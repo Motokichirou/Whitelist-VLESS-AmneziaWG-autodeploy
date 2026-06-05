@@ -30,7 +30,6 @@
 <!-- ───────────────────────────────────────────────────────────── -->
 
 ```bash
-# ⬇️ ЗАМЕНИ на свою raw-ссылку
 SCRIPT_URL="https://github.com/Motokichirou/AmneziaWG-autodeploy/raw/refs/heads/main/deploy-awg-portal.sh"
 
 curl -fsSL "$SCRIPT_URL" -o deploy-awg-portal.sh
