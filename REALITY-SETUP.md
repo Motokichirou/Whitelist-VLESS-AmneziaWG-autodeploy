@@ -79,15 +79,20 @@ vless://<uuid>@<АДРЕС_РЕЛЕЯ>:443?type=tcp&security=reality&flow=xtls-r
 `172.17.0.1:8443` (docker0-gateway хоста), а внутри контейнера amnezia туннельный `:443` DNAT-им
 туда. **Команды (на exit-узле, обратимо):**
 
+> ⚠️ **КРИТИЧНО: `-d 10.8.0.1` обязателен.** Без него DNAT ловит TCP:443 от ВСЕХ клиентов wg-easy
+> (телефоны, роутеры) и заворачивает их HTTPS в REALITY → тот проксирует на dest (`yastatic.net`),
+> и у клиентов весь HTTPS отдаёт чужой сертификат (`*.cdn.yandex.net`) и 404 — обход ломается для
+> всех. `-d 10.8.0.1` сужает правило только до трафика, который шлёт релей (на туннельный IP NL).
+
 ```bash
-docker exec amnezia-wg-easy iptables -t nat -A PREROUTING -i wg0 -p tcp --dport 443 \
+docker exec amnezia-wg-easy iptables -t nat -A PREROUTING -i wg0 -p tcp -d 10.8.0.1 --dport 443 \
   -j DNAT --to-destination 172.17.0.1:8443
 docker exec amnezia-wg-easy iptables -t nat -A POSTROUTING -d 172.17.0.1 -p tcp \
   --dport 8443 -j MASQUERADE
 # проверить:
 docker exec amnezia-wg-easy iptables -t nat -S | grep -E '443|8443'
 # ОТКАТ (-D вместо -A):
-docker exec amnezia-wg-easy iptables -t nat -D PREROUTING -i wg0 -p tcp --dport 443 \
+docker exec amnezia-wg-easy iptables -t nat -D PREROUTING -i wg0 -p tcp -d 10.8.0.1 --dport 443 \
   -j DNAT --to-destination 172.17.0.1:8443
 docker exec amnezia-wg-easy iptables -t nat -D POSTROUTING -d 172.17.0.1 -p tcp \
   --dport 8443 -j MASQUERADE
