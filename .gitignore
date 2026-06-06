@@ -1,0 +1,18 @@
+# --- СЕКРЕТЫ: никогда не коммитить ---
+.ssh/
+relay-keys/
+*.key
+*_rsa
+*_ed25519
+id_*
+# реальные конфиги с приватными ключами (публикуем только *.example)
+Yandex-Cloud.conf
+*.conf
+!*.conf.example
+# ops-доки с реальными IP/доступом
+RELAY-ACCESS.md
+mobile-whitelist-bypass-context.md
+# скриншоты консоли (имя аккаунта, IP)
+Screenshots/
+# локальное окружение
+.claude/

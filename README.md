@@ -1,145 +1,109 @@
-# AWG-портал — self-hosted AmneziaWG за Caddy + Authelia
+# Whitelist · VLESS · AmneziaWG — self-hosted autodeploy
 
-Однофайловый скрипт (`deploy-awg-portal.sh`) разворачивает на чистой Ubuntu готовый стек для обхода DPI/блокировок:
+Самохостед-стек для обхода блокировок РФ в **двух режимах**:
 
-- **amnezia-wg-easy** — сервер AmneziaWG + веб-панель (userspace, `wireguard-go`). Наружу торчит только `51820/udp`, сама панель висит на `127.0.0.1`.
-- **Caddy** — реверс-прокси с авто-TLS (Let's Encrypt). Панель отдаётся только после авторизации; apex-домен и голый IP получают безликую заглушку.
-- **Authelia** — портал входа с паролем и 2FA (TOTP). Единственный гейт к панели.
+1. **DPI-блокировки** (режут «то, что похоже на VPN») → **AmneziaWG** (обфусцированный WireGuard).
+2. **Режим белых списков** (оператор пускает только забелённые IP+SNI, всё прочее режет/блокирует) →
+   **VLESS + REALITY** с подменой SNI на белый домен, через RU-релей с белым IP.
+
+Вторая прослойка строится **поверх** первой: зарубежный AmneziaWG-VPS становится финальным egress,
+а RU-релей с белым IP — точкой входа, переживающей вайтлист.
 
 ```
-Интернет
-  ├─ https://<apex>             → заглушка «Сайт в разработке»
-  ├─ голый IP / неизвестный SNI → заглушка (self-signed)
-  ├─ https://<auth-поддомен>    → портал входа Authelia (+ 2FA)
-  └─ https://<panel-поддомен>   → Authelia → 127.0.0.1:51821 (панель wg-easy)
+                 ┌── DPI-режим ────────────────────────────────────────────────┐
+клиент ─AmneziaWG─────────────────────────────────────────────▶ NL exit-VPS ──▶ интернет
+                 └─────────────────────────────────────────────────────────────┘
+
+                 ┌── режим белых списков (IP+SNI) ─────────────────────────────┐
+телефон ─VLESS+REALITY(SNI=белый)─▶ Яндекс:443 (белый RU-IP, тонкий релей)
+        ─(DNAT → AmneziaWG-туннель)─▶ NL exit-VPS: REALITY терминируется ──▶ интернет
+                 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Требования
+## Когда какая прослойка
 
-- Ubuntu/Debian, доступ `root` (sudo).
-- Домен и **три A-записи** на IP сервера: apex (заглушка), поддомен панели, поддомен портала.
-- Открытые порты: `80/tcp` и `443/tcp` (TLS + выпуск сертификатов), `51820/udp` (WireGuard). Если у провайдера есть облачный фаервол — открой их и там.
-- Docker не обязателен заранее — скрипт поставит его сам, если нет.
+| Симптом | Что это | Решение |
+| --- | --- | --- |
+| VPN-протоколы рвутся/не коннектятся, обычный сайт открывается | DPI | хватает AmneziaWG (прослойка 1) |
+| `yandex.ru` открывается, `1.1.1.1`/`yahoo.com` — нет; VPN мёртв | белый список | нужен REALITY + белый IP (прослойка 2) |
+| Ничего не грузится, даже белое | блэкаут/троттлинг | **не лечится туннелем** (см. «Потолок») |
 
-## Запуск
+Проверка режима: открой белый домен по не-белому IP. Прошло → SNI-only (хватит подмены SNI).
+Не прошло → IP+SNI (нужен белый IP релея).
 
-> ⚠️ Скрипт **интерактивный** (спрашивает домены и IP), поэтому его надо сначала **скачать**, а не запускать через `curl | bash` — в пайпе ввод не работает.
-
-<!-- ───────────────────────────────────────────────────────────── -->
-<!-- https://github.com/Motokichirou/AmneziaWG-autodeploy/raw/refs/heads/main/deploy-awg-portal.sh -->
-<!-- ───────────────────────────────────────────────────────────── -->
-
-```bash
-SCRIPT_URL="https://github.com/Motokichirou/AmneziaWG-autodeploy/raw/refs/heads/main/deploy-awg-portal.sh"
-
-curl -fsSL "$SCRIPT_URL" -o deploy-awg-portal.sh
-sudo bash deploy-awg-portal.sh
-```
-
-Одной строкой:
-
-```bash
-curl -fsSL "https://github.com/Motokichirou/AmneziaWG-autodeploy/raw/refs/heads/main/deploy-awg-portal.sh" -o deploy-awg-portal.sh && sudo bash deploy-awg-portal.sh
-```
-
-## Что спросит
-
-| Запрос | По умолчанию |
-| --- | --- |
-| Домен-заглушка (apex) | — |
-| Поддомен админки | `panel.<домен>` |
-| Поддомен портала входа | `auth.<домен>` |
-| Публичный IP / DDNS сервера | автоопределение |
-
-## Что выдаст в конце
-
-- Ссылку на админку, логин `admin` и сгенерированный пароль.
-- 2FA: **QR прямо в терминале** + base32-секрет + `otpauth://` URI — добавь в Google Authenticator / Aegis.
-- Команду посмотреть текущий код с сервера: `oathtool --totp -b "<секрет>"`.
-
-Вход: открой `https://<panel>` → логин/пароль → 6-значный код.
-
-> Пароль и секрет 2FA печатаются **один раз** — сохрани вывод.
-
-## Обслуживание
-
-Файлы стека: `/opt/awg-portal`.
-
-```bash
-# статус контейнеров
-docker ps
-
-# логи
-docker compose -f /opt/awg-portal/docker-compose.yml logs -f caddy authelia
-
-# перевыпустить 2FA (новый секрет)
-docker run --rm -v /opt/awg-portal/authelia:/config authelia/authelia:latest \
-  authelia storage user totp generate admin --config /config/configuration.yml
-
-# сменить пароль: сгенерить argon2-хеш…
-docker run --rm authelia/authelia:latest \
-  authelia crypto hash generate argon2 --password 'НОВЫЙ_ПАРОЛЬ'
-# …вписать его в /opt/awg-portal/authelia/users_database.yml, затем:
-docker compose -f /opt/awg-portal/docker-compose.yml restart authelia
-```
-
-## После установки
-
-Зайди в панель и создай клиентов (телефон, роутер). Параметры обфускации AmneziaWG (`Jc/Jmin/Jmax/S1/S2/H1–H4`) сервер фиксирует при первом старте — их видно в сгенерированном `.conf` клиента, оттуда переноси на клиентов вроде MikroTik.
-
-## Заметки
-
-- Скрипт **идемпотентный**: повторный запуск пересоздаёт контейнеры; том `~/.amnezia-wg-easy` с ключами сервера и клиентами сохраняется.
-- Разворачивается **только серверная часть**. Клиенты (включая MikroTik-прокси с awg-proxy) настраиваются отдельно.
-- 2FA заводится заранее через CLI Authelia, поэтому код выдаётся сразу — без портальной регистрации через `notification.txt`.
-- Заглушка — это обфускация от сканеров, а не замена защиты. Реальную защиту держат TLS, сильный пароль + 2FA и свежий софт.
 ---
 
-## Клиент на MikroTik (RouterOS 7.x)
+## Прослойка 1 — AmneziaWG (база)
 
-Скрипт `awg-client-mikrotik.rsc` поднимает на роутере клиента AmneziaWG: контейнер `awg-proxy` (обфускация AWG) + локальный WireGuard-интерфейс + masquerade + mangle + selective-routing. Заблокированные адреса (по `list-antifilter`) уходят в туннель, остальное — напрямую через провайдера.
+### Сервер: `deploy-awg-portal.sh`
+Разворачивает на чистой Ubuntu стек за Caddy + Authelia:
+- **amnezia-wg-easy** — сервер AmneziaWG + веб-панель (userspace), наружу только `51820/udp`.
+- **Caddy** — реверс-прокси с авто-TLS; apex и голый IP получают заглушку.
+- **Authelia** — портал входа с паролем + 2FA (TOTP), единственный гейт к панели.
 
+```bash
+curl -fsSL "https://github.com/Motokichirou/Whitelist-VLESS-AmneziaWG-autodeploy/raw/refs/heads/main/deploy-awg-portal.sh" -o deploy-awg-portal.sh
+sudo bash deploy-awg-portal.sh
 ```
-LAN ──(dst ∈ list-antifilter)──▶ wg-awg-proxy ─▶ контейнер awg-proxy ──AWG──▶ сервер
-LAN ──(всё остальное)──────────▶ обычный шлюз провайдера
-```
+Интерактивный (спрашивает домены/IP) — качай файл, не запускай через `curl | bash`. Идемпотентен;
+том ключей `~/.amnezia-wg-easy` сохраняется. Подробности — в шапке скрипта и его выводе.
 
-### Предусловия (один раз, вручную)
+### Клиент MikroTik: `awg-client-mikrotik.rsc`
+RouterOS 7.x: контейнер `awg-proxy` + selective-routing по `list-antifilter` (заблокированное —
+в туннель, остальное — напрямую). Вставляешь `.conf` из панели в блок CONFIG, заливаешь,
+`/import file=awg-client-mikrotik.rsc`. Детали — в шапке `.rsc`.
 
-- Включить контейнеры: `/system device-mode update container=yes` (требует подтверждения кнопкой/перезагрузки).
-- Залить образ `awg-proxy` в **Files** (для ARM, напр. RB4011 — `awg-proxy-arm.tar.gz`); имя задаётся в tunable `imageFile`.
-- На роутере есть бридж в interface-list `LAN` (defconf) и WAN на `ether1`.
+---
 
-### Запуск
+## Прослойка 2 — VLESS + REALITY (обход белых списков)
 
-1. В панели wg-easy создай клиента и скачай его `.conf`.
-2. Открой `awg-client-mikrotik.rsc` и вставь содержимое `.conf` в блок `CONFIG` вверху — **это единственное, что нужно вставить**.
-3. Залей файл на роутер и выполни:
+Нужна, когда оператор в режиме **IP+SNI**: AmneziaWG (UDP, без SNI, незабелённый IP) под вайтлистом
+недостижим в принципе. Решение — **VLESS+REALITY поверх TCP:443** с подменой SNI на белый домен,
+через RU-релей с белым IP. REALITY терминируется на NL — релей ничего не расшифровывает.
 
-```
-/import file=awg-client-mikrotik.rsc
-```
+### Компоненты
+- **`YANDEX-RELAY-SETUP.md`** — провижининг RU-ВМ с белым IP (Yandex Cloud), установка AmneziaWG,
+  туннель до NL.
+- **`relay-forward-setup.sh`** — на релее: проброс входящего `:443` внутрь AWG-туннеля + персист.
+- **`deploy-3xui.sh`** — на NL: панель **3X-UI** (Xray) за тем же Caddy + Authelia, REALITY-inbound.
+- **`REALITY-SETUP.md`** — настройка REALITY-inbound (выбор белого SNI, поля, `vless://`) +
+  стыковочный DNAT в контейнере amnezia.
+- **`Yandex-Cloud.conf.example`** — шаблон конфига релея.
 
-`/import` надёжнее вставки в терминал: встроенный `rkn-unblock` идёт длинной строкой `source="…"`.
+### Белый SNI
+Community-списки забелённого: [`hxehex/russia-mobile-internet-whitelist`](https://github.com/hxehex/russia-mobile-internet-whitelist).
+Для REALITY-dest нужен белый домен с TLS 1.3 + HTTP/2 + X25519 — например **`yastatic.net`**
+(резерв `avatars.mds.yandex.net`).
 
-### Что делает сам
+### Порядок развёртывания (прослойка 2)
+1. `YANDEX-RELAY-SETUP.md` — поднять RU-релей с белым IP + туннель до NL.
+2. На NL: `sudo bash deploy-3xui.sh` (нужна A-запись `<поддомен>` → NL) → создать REALITY-inbound.
+3. `relay-forward-setup.sh` на релее + стыковочный DNAT на NL (`REALITY-SETUP.md`).
+4. Собрать `vless://` (`address` = белый IP релея, `:443`) + QR на телефон.
+   Клиенты: iOS — Happ/Streisand; Android — v2rayNG/husi.
 
-- Разбирает `.conf`: приватный ключ, `Address`, серверный `PublicKey`, `Endpoint`, параметры AmneziaWG (`Jc/Jmin/Jmax/S1/S2/H1–H4`), `PresharedKey` (если есть).
-- Создаёт veth + контейнер `awg-proxy` с нужными env (клиентский pubkey RouterOS вычисляет сам).
-- Поднимает интерфейс `wg-awg-proxy` с **туннельным IP из `Address`** (не со служебным IP veth — иначе endpoint пира совпадает с собственным адресом интерфейса и рукопожатие уходит «в себя»: tx>0, rx=0).
-- Вешает masquerade в туннель, mangle (`dst-address-list=list-antifilter`, `in-interface-list=LAN`) и дефолт `0.0.0.0/0` через туннель в таблице `rkn`.
-- Встроенный `rkn-unblock` наполняет `list-antifilter` (чанковый фетч `antifilter.download/list/allyouneed.lst`) + планировщик раз в сутки.
+---
 
-Скрипт идемпотентный — повторный запуск пересоздаёт объекты (контейнер, интерфейс, NAT/mangle/route, `rkn-unblock`).
+## Безопасность
+- Заглушка на apex/голом IP — обфускация от сканеров, не замена защиты. Реальную защиту держат
+  TLS + сильный пароль + 2FA + свежий софт.
+- **RU-релей завязан на личность** (телефон→паспорт) и память работающего сервиса видна гипервизору —
+  поэтому REALITY и egress держим на зарубежном NL, а релей делаем тонким (знает только про NL).
+  Хардening релея — в `YANDEX-RELAY-SETUP.md` §5.
+- **Секреты не коммитим**: приватные ключи, реальные `.conf`, доступы — в `.gitignore`. Публикуется
+  только код и обезличенные гайды.
 
-### Проверка
+## Потолок (честно)
+REALITY + белый SNI решают **вайтлист**, но не физическое отключение. При полном блэкауте или
+троттлинге до 14 кбит/с туннель едет по той же дохлой трубе — на стороне клиента это не лечится ничем.
 
-```
-/interface wireguard peers print where interface=wg-awg-proxy
-/container print where name=awg-proxy
-/ip firewall address-list print count-only where list=list-antifilter
-```
-
-Через 10–30 c у пира должен появиться handshake и `rx > 0`.
-
-> Тюнинг — в секции tunables вверху скрипта: имя образа, каталог rootfs, служебная veth-подсеть, `listen-port`, MTU. Частота обновления списка — в строке `/system scheduler … interval=1d`.
+## Карта файлов
+| Файл | Слой | Где запускать |
+| --- | --- | --- |
+| `deploy-awg-portal.sh` | 1 | NL (сервер) |
+| `awg-client-mikrotik.rsc` | 1 | MikroTik |
+| `YANDEX-RELAY-SETUP.md` | 2 | гайд (RU-релей) |
+| `relay-forward-setup.sh` | 2 | RU-релей |
+| `deploy-3xui.sh` | 2 | NL (сервер) |
+| `REALITY-SETUP.md` | 2 | гайд (NL + клиент) |
+| `Yandex-Cloud.conf.example` | 2 | шаблон |
