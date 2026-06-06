@@ -20,7 +20,7 @@ AUTHELIA_CFG="${STACK_DIR}/authelia/configuration.yml"
 XUI_IMAGE="ghcr.io/mhsanaei/3x-ui:latest"
 XUI_PORT=2053
 REALITY_PORT=8443      # REALITY-inbound: слушает в контейнере, публикуется на 172.17.0.1 (docker0)
-XUI_PATH="/panel/"     # фикс. webBasePath панели (иначе 3x-ui генерит случайный)
+XUI_PATH="/"           # webBasePath на корне: голый домен сразу открывает панель (за Authelia)
 
 c_grn=$'\e[1;32m'; c_yel=$'\e[1;33m'; c_red=$'\e[1;31m'; c_cyn=$'\e[1;36m'; c_rst=$'\e[0m'
 say()  { printf '%s[*]%s %s\n' "$c_cyn" "$c_rst" "$*"; }
