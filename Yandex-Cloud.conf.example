@@ -1,7 +1,7 @@
-# Шаблон AmneziaWG-конфига для Яндекс-релея (RU-вход с белым IP).
-# Создаётся в панели wg-easy на NL как обычный клиент, затем кладётся на релей в
+# Шаблон AmneziaWG-конфига для регионального релея (вход → туннель до exit-узла).
+# Создаётся в панели wg-easy на exit-узле как обычный клиент, затем кладётся на релей в
 # /etc/amnezia/amneziawg/awg0.conf С ТРЕМЯ ПРАВКАМИ (см. YANDEX-RELAY-SETUP.md):
-#   • AllowedIPs → ТОЛЬКО туннельная подсеть NL (НЕ 0.0.0.0/0) — иначе SSH к релею оборвётся;
+#   • AllowedIPs → ТОЛЬКО туннельная подсеть exit-узла (НЕ 0.0.0.0/0) — иначе SSH к релею оборвётся;
 #   • PersistentKeepalive = 25 (релей за NAT облака);
 #   • строку DNS убрать (awg-quick падает без resolvconf, релею DNS не нужен).
 #
@@ -10,7 +10,7 @@
 [Interface]
 PrivateKey = <PRIVATE_KEY_КЛИЕНТА>
 Address = 10.8.0.X/24
-# AWG обфускация-профиль — ДОЛЖЕН совпадать с сервером NL (общий для всех пиров):
+# AWG обфускация-профиль — ДОЛЖЕН совпадать с exit-узлом (общий для всех пиров):
 Jc = 3
 Jmin = 50
 Jmax = 1000
@@ -22,8 +22,8 @@ H3 = <H3>
 H4 = <H4>
 
 [Peer]
-PublicKey = <СЕРВЕРНЫЙ_PUBKEY_NL>
+PublicKey = <СЕРВЕРНЫЙ_PUBKEY_EXIT_УЗЛА>
 PresharedKey = <PSK_ЕСЛИ_ЕСТЬ>
 AllowedIPs = 10.8.0.0/24
 PersistentKeepalive = 25
-Endpoint = <NL_PUBLIC_IP>:51820
+Endpoint = <EXIT_PUBLIC_IP>:51820
