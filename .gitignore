@@ -9,9 +9,10 @@ id_*
 Yandex-Cloud.conf
 *.conf
 !*.conf.example
-# ops-доки с реальными IP/доступом
+# ops-доки с реальными IP/доступом + приватный мануал
 RELAY-ACCESS.md
 mobile-whitelist-bypass-context.md
+DEPLOY-GUIDE-LOCAL.md
 # скриншоты консоли (имя аккаунта, IP)
 Screenshots/
 # локальное окружение
