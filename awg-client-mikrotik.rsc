@@ -1,7 +1,7 @@
 # =====================================================================
 #  AWG-proxy client для MikroTik (RouterOS 7.x)
 #  Разворачивает клиента AmneziaWG: контейнер awg-proxy + WireGuard-интерфейс
-#  + masquerade + mangle + selective-routing (rkn) под обход по list-antifilter.
+#  + masquerade + mangle + policy-based routing по custom-routes.
 #
 #  ЧТО СДЕЛАТЬ:
 #    1) Вставь в блок ниже (CONFIG) скачанный с панели wg-easy .conf клиента.
@@ -9,7 +9,7 @@
 #    2) (опц.) Проверь tunables (имя образа контейнера, каталог).
 #    3) Залей файл на роутер и выполни:  /import file=awg-client-mikrotik.rsc
 #       (или просто вставь весь текст в терминал Winbox/SSH).
-#  Скрипт rkn-unblock (наполнение list-antifilter) уже ВСТРОЕН ниже.
+#  Скрипт route-list-updater (наполнение custom-routes) уже ВСТРОЕН ниже.
 #
 #  ПРЕДУСЛОВИЯ (делается один раз заранее, скриптом НЕ автоматизируется):
 #    • Контейнеры включены:  /system device-mode update container=yes  (требует
@@ -88,14 +88,14 @@
 :do { /interface wireguard remove [find where name=wg-awg-proxy] } on-error={}
 :do { /interface veth remove [find where name=veth-awg-proxy] } on-error={}
 :do { /ip firewall nat remove [find where comment="awg-proxy"] } on-error={}
-:do { /ip firewall mangle remove [find where comment="awg-proxy rkn"] } on-error={}
+:do { /ip firewall mangle remove [find where comment="awg-proxy routes"] } on-error={}
 :do { /ip route remove [find where comment="awg-proxy"] } on-error={}
-:do { /system scheduler remove [find where name=rkn-unblock] } on-error={}
-:do { /system script remove [find where name=rkn-unblock] } on-error={}
+:do { /system scheduler remove [find where name=route-list-updater] } on-error={}
+:do { /system script remove [find where name=route-list-updater] } on-error={}
 
-# --------------------- 1. таблица маршрутизации rkn -----------------
-:if ([:len [/routing table find where name=rkn]] = 0) do={
-    /routing table add fib name=rkn;
+# --------------------- 1. таблица маршрутизации vpnroute -----------------
+:if ([:len [/routing table find where name=vpnroute]] = 0) do={
+    /routing table add fib name=vpnroute;
 }
 
 # --------------------- 2. veth-пара под контейнер -------------------
@@ -142,34 +142,36 @@
 # --------------------- 7. NAT: маскарад в туннель -------------------
 /ip firewall nat add chain=srcnat action=masquerade out-interface=wg-awg-proxy comment="awg-proxy";
 
-# --------------------- 8. mangle: LAN → заблокированные в rkn --------
-# Только трафик из LAN (бридж), идущий на адреса из list-antifilter, помечается
-# меткой rkn. Контейнер заходит через veth (не в LAN) — его трафик к серверу
+# --------------------- 8. mangle: LAN → выбранные адреса в vpnroute --------
+# Только трафик из LAN (бридж), идущий на адреса из custom-routes, помечается
+# меткой vpnroute. Контейнер заходит через veth (не в LAN) — его трафик к серверу
 # не маркируется, петли нет.
-/ip firewall mangle add chain=prerouting action=mark-routing new-routing-mark=rkn \
-    dst-address-list=list-antifilter in-interface-list=LAN passthrough=no comment="awg-proxy rkn";
+/ip firewall mangle add chain=prerouting action=mark-routing new-routing-mark=vpnroute \
+    dst-address-list=custom-routes in-interface-list=LAN passthrough=no comment="awg-proxy routes";
 
-# --------------------- 9. дефолт в таблице rkn через туннель ---------
-/ip route add dst-address=0.0.0.0/0 gateway=wg-awg-proxy routing-table=rkn comment="awg-proxy";
+# --------------------- 9. дефолт в таблице vpnroute через туннель ---------
+/ip route add dst-address=0.0.0.0/0 gateway=wg-awg-proxy routing-table=vpnroute comment="awg-proxy";
 
 # =====================================================================
-#  ANTIFILTER — скрипт rkn-unblock наполняет address-list list-antifilter
-#  (чанковый фетч https://antifilter.download/list/allyouneed.lst). Встроен
-#  ниже одной строкой source="..." (экранирован) + планировщик раз в сутки.
+#  ОБНОВЛЕНИЕ СПИСКА — скрипт route-list-updater наполняет address-list custom-routes
+#  адресами из своего источника (URL). Источник задаётся переменной url в теле
+#  скрипта ниже — ЗАМЕНИ плейсхолдер https://routes.example.com/list.lst на свой.
+#  Формат источника: текст, по одной CIDR/IP-записи в строке. Встроен ниже одной
+#  строкой source="..." (экранирован) + планировщик раз в сутки.
 # ---------------------------------------------------------------------
-/system script add name=rkn-unblock policy=ftp,reboot,read,write,policy,test,password,sniff,sensitive,romon source=":do {\n    :local retryflag true;\n    :local maxretry 3;\n    :local delay 120s;\n    :local url \"https://antifilter.download/list/allyouneed.lst\";\n    :local listname \"list-antifilter\";\n    :for retry from=1 to=\$maxretry step=1 do={\n        :if (retryflag) do={\n            :set \$retryflag false;\n            :set \$counter 0;\n            :if (retry > 1) do={\n                :delay \$delay;\n            };\n            :do {\n                /ip firewall address-list remove [find where list=(\$listname.\"-updated\")];\n            } on-error={};\n            :do {\n                /ip firewall address-list add list=(\$listname.\"-updated\") address=antifilter.download comment=\"antifilter.download\";\n            } on-error={};\n            :local filesize ([/tool fetch url=\$url keep-result=no as-value]->\"total\");\n            :local chunksize 64000;\n            :local start 0;\n            :local end (\$chunksize - 1);\n            :local chunks (\$filesize / (\$chunksize / 1024));\n            :local lastchunk (\$filesize % (\$chunksize / 1024));\n            :if (\$lastchunk > 0) do={\n                :set \$chunks (\$chunks + 1);\n            };\n            :for chunk from=1 to=\$chunks step=1 do={\n                :local comparesize ([/tool fetch url=\$url keep-result=no as-value]->\"total\");\n                :if (\$comparesize = \$filesize) do={\n                    :set \$data ([:tool fetch url=\$url http-header-field=\"Range: bytes=\$start-\$end\" output=user as-value]->\"data\");\n                } else={\n                    :set \$data [:toarray \"\"];\n                    :set \$retryflag true;\n                };\n                :local regexp \"^((25[0-5]|(2[0-4]|[01]?[0-9]?)[0-9])\\\\.){3}(25[0-5]|(2[0-4]|[01]?[0-9]?)[0-9])(\\\\/(3[0-2]|[0-2]?[0-9])){0,1}\\\$\";\n                :if (\$start > 0) do={\n                    :set \$data [:pick \$data ([:find \$data \"\\n\"]+1) [:len \$data]];\n                };\n                \n                :while ([:len \$data]!=0) do={\n                    :local line [:pick \$data 0 [:find \$data \"\\n\"]];\n                    :if ( \$line ~ \$regexp ) do={    \n                        :do {\n                            /ip firewall address-list add list=(\$listname.\"-updated\") address=\$line;\n                            :set \$counter (\$counter + 1);\n                        } on-error={};        \n                    };\n                    :set \$data [:pick \$data ([:find \$data \"\\n\"]+1) [:len \$data]];\n                    :if ([:len \$data] < 256) do={\n                        :set \$data [:toarray \"\"];\n                    };\n                };\n                :set \$start ((\$start-512) + \$chunksize); \n                :set \$end ((\$end-512) + \$chunksize); \n            \n            };\n        \n        };\n    };\n    :if (\$counter > 0) do={\n        :do {\n            /ip firewall address-list remove [find where list=\$listname];\n        } on-error={};\n        :do {\n            :foreach address in=[/ip firewall address-list find list=(\$listname.\"-updated\")] do={\n                :do {\n                    /ip firewall address-list set list=\$listname \$address;\n                } on-error={};\n            };\n        } on-error={};\n    };\n} on-error={};"
+/system script add name=route-list-updater policy=ftp,reboot,read,write,policy,test,password,sniff,sensitive,romon source=":do {\n    :local retryflag true;\n    :local maxretry 3;\n    :local delay 120s;\n    :local url \"https://routes.example.com/list.lst\";\n    :local listname \"custom-routes\";\n    :for retry from=1 to=\$maxretry step=1 do={\n        :if (retryflag) do={\n            :set \$retryflag false;\n            :set \$counter 0;\n            :if (retry > 1) do={\n                :delay \$delay;\n            };\n            :do {\n                /ip firewall address-list remove [find where list=(\$listname.\"-updated\")];\n            } on-error={};\n            :do {\n                /ip firewall address-list add list=(\$listname.\"-updated\") address=routes.example.com comment=\"routes.example.com\";\n            } on-error={};\n            :local filesize ([/tool fetch url=\$url keep-result=no as-value]->\"total\");\n            :local chunksize 64000;\n            :local start 0;\n            :local end (\$chunksize - 1);\n            :local chunks (\$filesize / (\$chunksize / 1024));\n            :local lastchunk (\$filesize % (\$chunksize / 1024));\n            :if (\$lastchunk > 0) do={\n                :set \$chunks (\$chunks + 1);\n            };\n            :for chunk from=1 to=\$chunks step=1 do={\n                :local comparesize ([/tool fetch url=\$url keep-result=no as-value]->\"total\");\n                :if (\$comparesize = \$filesize) do={\n                    :set \$data ([:tool fetch url=\$url http-header-field=\"Range: bytes=\$start-\$end\" output=user as-value]->\"data\");\n                } else={\n                    :set \$data [:toarray \"\"];\n                    :set \$retryflag true;\n                };\n                :local regexp \"^((25[0-5]|(2[0-4]|[01]?[0-9]?)[0-9])\\\\.){3}(25[0-5]|(2[0-4]|[01]?[0-9]?)[0-9])(\\\\/(3[0-2]|[0-2]?[0-9])){0,1}\\\$\";\n                :if (\$start > 0) do={\n                    :set \$data [:pick \$data ([:find \$data \"\\n\"]+1) [:len \$data]];\n                };\n                \n                :while ([:len \$data]!=0) do={\n                    :local line [:pick \$data 0 [:find \$data \"\\n\"]];\n                    :if ( \$line ~ \$regexp ) do={    \n                        :do {\n                            /ip firewall address-list add list=(\$listname.\"-updated\") address=\$line;\n                            :set \$counter (\$counter + 1);\n                        } on-error={};        \n                    };\n                    :set \$data [:pick \$data ([:find \$data \"\\n\"]+1) [:len \$data]];\n                    :if ([:len \$data] < 256) do={\n                        :set \$data [:toarray \"\"];\n                    };\n                };\n                :set \$start ((\$start-512) + \$chunksize); \n                :set \$end ((\$end-512) + \$chunksize); \n            \n            };\n        \n        };\n    };\n    :if (\$counter > 0) do={\n        :do {\n            /ip firewall address-list remove [find where list=\$listname];\n        } on-error={};\n        :do {\n            :foreach address in=[/ip firewall address-list find list=(\$listname.\"-updated\")] do={\n                :do {\n                    /ip firewall address-list set list=\$listname \$address;\n                } on-error={};\n            };\n        } on-error={};\n    };\n} on-error={};"
 
-/system scheduler add name=rkn-unblock interval=1d \
-    on-event="/system script run rkn-unblock" \
+/system scheduler add name=route-list-updater interval=1d \
+    on-event="/system script run route-list-updater" \
     policy=ftp,reboot,read,write,policy,test,password,sniff,sensitive,romon \
-    comment="awg-proxy: обновление list-antifilter";
+    comment="awg-proxy: обновление custom-routes";
 
 # первичное наполнение списка (может занять пару минут)
 :do {
-    /system script run rkn-unblock;
-    :put "[*] rkn-unblock запущен — наполняю list-antifilter.";
+    /system script run route-list-updater;
+    :put "[*] route-list-updater запущен — наполняю custom-routes.";
 } on-error={
-    :put "[!] Не удалось запустить rkn-unblock.";
+    :put "[!] Не удалось запустить route-list-updater.";
 }
 # =====================================================================
 
@@ -191,4 +193,4 @@
 :put "Проверь через ~10–30 c (должны быть handshake и rx > 0):";
 :put "    /interface wireguard peers print where interface=wg-awg-proxy";
 :put "    /container print where name=awg-proxy";
-:put "    /ip firewall address-list print count-only where list=list-antifilter";
+:put "    /ip firewall address-list print count-only where list=custom-routes";
